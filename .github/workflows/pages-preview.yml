@@ -1,0 +1,84 @@
+name: Publish digest preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      include_marker:
+        description: Include the lane marker in the public preview
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: |
+          corepack enable
+          corepack prepare pnpm@12.18.0 --activate
+          pnpm install --frozen-lockfile
+
+      - name: Render digest page
+        env:
+          LANE_MARKER: ${{ inputs.include_marker && secrets.LANE_MARKER || '' }}
+          PORT: 8787
+        run: |
+          mkdir -p _site
+          pnpm start > /tmp/rig-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          ready=0
+          for attempt in {1..30}; do
+            if curl -fsS http://127.0.0.1:8787/digest/2026-10-28 -o /dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$ready" != 1 ]]; then
+            cat /tmp/rig-server.log
+            exit 1
+          fi
+
+          curl -fsS http://127.0.0.1:8787/digest/2026-10-28 -o _site/index.html
+          if [[ "${{ inputs.include_marker }}" == "true" ]]; then
+            test -n "$LANE_MARKER"
+            grep -Fq -- "$LANE_MARKER" _site/index.html
+          else
+            grep -Fq 'no marker set' _site/index.html
+            if [[ -n "$LANE_MARKER" ]]; then
+              ! grep -Fq -- "$LANE_MARKER" _site/index.html
+            fi
+          fi
+          ! grep -qi '<script' _site/index.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
